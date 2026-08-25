@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Автоматический ИИ Цензор</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 40px; background: #f3f4f6; color: #1f2937; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; color: #111827; }
+        .input-group { margin-bottom: 20px; }
+        button { width: 100%; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #1d4ed8; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .status-box { background: #f9fafb; border: 1px solid #e5e7eb; padding: 15px; border-radius: 6px; margin-top: 20px; font-family: monospace; font-size: 14px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+        .badge { display: inline-block; background: #fee2e2; color: #991b1b; padding: 4px 8px; border-radius: 4px; margin: 4px; font-size: 13px; font-weight: 500; }
+        #playBtn { background: #10b981; margin-top: 10px; }
+        #playBtn:hover { background: #059669; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>🤖 Авто-запикивание мата (ИИ на GitHub Pages)</h2>
+    <p style="color: #6b7280; font-size: 14px;">Нейросеть Whisper определит мат и заглушит его прямо в вашем браузере.</p>
+    
+    <div class="input-group">
+        <label style="display:block; margin-bottom:8px; font-weight:500;">Выберите аудиофайл:</label>
+        <input type="file" id="audioFile" accept="audio/*">
+    </div>
+
+    <button id="processBtn">Запустить ИИ и заглушить мат</button>
+    <button id="playBtn" disabled>▶ Воспроизвести чистую версию</button>
+
+    <div id="wordsContainer" style="margin-top: 15px;"></div>
+    
+    <div class="status-box" id="statusLog">Ожидание файла...</div>
+</div>
+
+<script type="module">
+    // Подключаем стабильную версию библиотеки для веб-среды
+    import { pipeline, env } from 'https://jsdelivr.net';
+
+    // ВАЖНО ДЛЯ GITHUB PAGES: Отключаем поиск локальных моделей, работаем напрямую с CDN хостинга моделей
+    env.allowLocalModels = false;
+
+    let pipe = null;
+    let audioCtx = null;
+    let originalBuffer = null;
+    let cleanBuffer = null;
+    let currentSource = null;
+
+    const processBtn = document.getElementById('processBtn');
+    const playBtn = document.getElementById('playBtn');
+    const statusLog = document.getElementById('statusLog');
+    const wordsContainer = document.getElementById('wordsContainer');
+    const fileInput = document.getElementById('audioFile');
+
+    const SWEAR_ROOTS = ['хуй', 'пизд', 'еба', 'ебл', 'бля', 'мудак', 'сука', 'гондо', 'хуле', 'хули'];
+
+    function log(text) {
+        statusLog.innerText += `\n[${new Date().toLocaleTimeString()}] ${text}`;
+        statusLog.scrollTop = statusLog.scrollHeight;
+    }
+
+    function isProfane(word) {
+        const cleanWord = word.toLowerCase().replace(/[^а-яё]/g, '');
+        return SWEAR_ROOTS.some(root => cleanWord.includes(root));
+    }
+
+    async function initAI() {
+        if (!pipe) {
+            log("Загрузка ИИ-модели Whisper (около 75 МБ, скачивается один раз в кэш браузера)...");
+            // Используем оптимизированную под веб модель tiny
+            pipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+                progress_callback: (progress) => {
+                    if (progress.status === 'progress') {
+                        log(`Загрузка ИИ: ${Math.round(progress.loaded / progress.total * 100)}%`);
+                    }
+                }
+            });
+            log("ИИ-модель готова к работе!");
+        }
+    }
+
+    processBtn.addEventListener('click', async () => {
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert("Пожалуйста, выберите аудиофайл!");
+            return;
+        }
+
+        processBtn.disabled = true;
+        playBtn.disabled = true;
+        wordsContainer.innerHTML = '';
+        
+        try {
+            await initAI();
+            
+            log("Декодирование аудиофайла...");
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const file = fileInput.files[0];
+            const arrayBuffer = await file.arrayBuffer();
+            originalBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            log("Подготовка звука для нейросети (конвертация в 16кГц)...");
+            const offlineCtx = new OfflineAudioContext(1, originalBuffer.duration * 16000, 16000);
+            const bufferSource = offlineCtx.createBufferSource();
+            bufferSource.buffer = originalBuffer;
+            bufferSource.connect(offlineCtx.destination);
+            bufferSource.start();
+            const renderedBuffer = await offlineCtx.startRendering();
+            const audioData32 = renderedBuffer.getChannelData(0);
+
+            log("Нейросеть слушает трек... (это может занять время, зависит от длины песни)");
+            const result = await pipe(audioData32, {
+                chunk_length_s: 30,
+                stride_length_s: 5,
+                language: 'russian',
+                task: 'transcribe',
+                return_timestamps: 'word'
+            });
+
+            log("Алгоритм проверяет текст на мат...");
+            const badTimestamps = [];
+            
+            if (result && result.chunks) {
+                result.chunks.forEach(chunk => {
+                    const textWord = chunk.text.trim();
+                    if (isProfane(textWord)) {
+                        badTimestamps.push({
+                            start: chunk.timestamp[0],
+                            end: chunk.timestamp[1],
+                            word: textWord
+                        });
+                        wordsContainer.innerHTML += `<span class="badge">🤬 ${textWord} (${chunk.timestamp[0]}с)</span>`;
+                    }
+                });
+            }
+
+            log(`Найдено нецензурных слов: ${badTimestamps.length}`);
+
+            log("Применение звукового фильтра цензуры к оригиналу...");
+            const rate = originalBuffer.sampleRate;
+            cleanBuffer = audioCtx.createBuffer(originalBuffer.numberOfChannels, originalBuffer.length, rate);
+            
+            for (let ch = 0; ch < originalBuffer.numberOfChannels; ch++) {
+                cleanBuffer.copyToChannel(originalBuffer.getChannelData(ch), ch);
+            }
+
+            const beepFreq = 1000; 
+
+            badTimestamps.forEach(({ start, end }) => {
+                if (start === null || end === null || isNaN(start) || isNaN(end)) return; 
+
+                const startIdx = Math.floor(start * rate);
+                const endIdx = Math.floor(end * rate);
+
+                for (let ch = 0; ch < cleanBuffer.numberOfChannels; ch++) {
+                    const data = cleanBuffer.getChannelData(ch);
+                    for (let i = startIdx; i < endIdx; i++) {
+                        if (i >= data.length) break;
+                        const time = i / rate;
+                        data[i] = Math.sin(2 * Math.PI * beepFreq * time) * 0.25; 
+                    }
+                }
+            });
+
+            log("🚀 Успешно! Нажмите кнопку воспроизведения.");
+            playBtn.disabled = false;
+
+        } catch (error) {
+            log("Произошла ошибка: " + error.message);
+            console.error(error);
+        } finally {
+            processBtn.disabled = false;
+        }
+    });
+
+    playBtn.addEventListener('click', () => {
+        if (currentSource) {
+            currentSource.stop();
+            currentSource = null;
+            playBtn.innerText = '▶ Воспроизвести чистую версию';
+            return;
+        }
+
+        currentSource = audioCtx.createBufferSource();
+        currentSource.buffer = cleanBuffer;
+        currentSource.connect(audioCtx.destination);
+        currentSource.start();
+        playBtn.innerText = '⏹ Остановить трек';
+
+        currentSource.onended = () => {
+            playBtn.innerText = '▶ Воспроизвести чистую версию';
+            currentSource = null;
+        };
+    });
+</script>
+
+</body>
+</html>
