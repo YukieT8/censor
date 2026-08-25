@@ -38,11 +38,12 @@
 </div>
 
 <script type="module">
-    // Подключаем стабильную версию библиотеки для веб-среды
-    import { pipeline, env } from 'https://jsdelivr.net';
+    // ВАЖНО: Импортируем библиотеку через unpkg.com, так как jsdelivr заблокирован в РФ
+    import { pipeline, env } from 'https://unpkg.com';
 
-    // ВАЖНО ДЛЯ GITHUB PAGES: Отключаем поиск локальных моделей, работаем напрямую с CDN хостинга моделей
+    // Конфигурация путей для стабильной работы на внешних хостингах (GitHub Pages)
     env.allowLocalModels = false;
+    env.backends.onnx.wasm.wasmPaths = 'https://unpkg.com';
 
     let pipe = null;
     let audioCtx = null;
@@ -56,6 +57,7 @@
     const wordsContainer = document.getElementById('wordsContainer');
     const fileInput = document.getElementById('audioFile');
 
+    // Базовый массив матерных корней для проверки текста
     const SWEAR_ROOTS = ['хуй', 'пизд', 'еба', 'ебл', 'бля', 'мудак', 'сука', 'гондо', 'хуле', 'хули'];
 
     function log(text) {
@@ -71,15 +73,20 @@
     async function initAI() {
         if (!pipe) {
             log("Загрузка ИИ-модели Whisper (около 75 МБ, скачивается один раз в кэш браузера)...");
-            // Используем оптимизированную под веб модель tiny
-            pipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
-                progress_callback: (progress) => {
-                    if (progress.status === 'progress') {
-                        log(`Загрузка ИИ: ${Math.round(progress.loaded / progress.total * 100)}%`);
+            
+            try {
+                pipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+                    progress_callback: (progress) => {
+                        if (progress.status === 'progress') {
+                            log(`Загрузка ИИ: ${Math.round(progress.loaded / progress.total * 100)}%`);
+                        }
                     }
-                }
-            });
-            log("ИИ-модель готова к работе!");
+                });
+                log("ИИ-модель готова к работе!");
+            } catch (err) {
+                log("Ошибка инициализации ИИ: " + err.message);
+                throw err;
+            }
         }
     }
 
@@ -111,7 +118,7 @@
             const renderedBuffer = await offlineCtx.startRendering();
             const audioData32 = renderedBuffer.getChannelData(0);
 
-            log("Нейросеть слушает трек... (это может занять время, зависит от длины песни)");
+            log("Нейросеть слушает трек... (это может занять время)");
             const result = await pipe(audioData32, {
                 chunk_length_s: 30,
                 stride_length_s: 5,
@@ -169,7 +176,7 @@
             playBtn.disabled = false;
 
         } catch (error) {
-            log("Произошла ошибка: " + error.message);
+            log("Произошла ошибка во время обработки: " + error.message);
             console.error(error);
         } finally {
             processBtn.disabled = false;
